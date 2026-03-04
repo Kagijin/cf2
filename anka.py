@@ -10,6 +10,9 @@ import cv2
 import numpy as np
 import mss # Substitui o pyautogui para capturas ultrarrápidas
 
+cv2.setUseOptimized(True)
+cv2.setNumThreads(max(1, min(4, os.cpu_count() or 1)))
+
 # --- CONFIGURAÇÕES DE SISTEMA ---
 def set_high_priority():
     try:
@@ -79,6 +82,8 @@ class AnkaBotFarm(ctk.CTk):
         # --- DICIONÁRIO DE COOLDOWNS ---
         # Armazena o timestamp do último clique de cada botão para evitar spam
         self.cooldowns = {}
+        self.scale_factor = 0.70  # Reduz custo do matchTemplate em VMs mais fracas
+        self.loop_sleep = 0.0015
         
         # --- CACHE DE TEMPLATES (OPEN-CV) ---
         self.templates = {}
@@ -94,7 +99,19 @@ class AnkaBotFarm(ctk.CTk):
             if os.path.exists(caminho):
                 img = cv2.imread(caminho, cv2.IMREAD_GRAYSCALE)
                 if img is not None:
-                    self.templates[nome] = img
+                    # Mantém versão original e reduzida para reduzir uso de CPU em VMs
+                    if self.scale_factor < 1.0:
+                        w = max(1, int(img.shape[1] * self.scale_factor))
+                        h = max(1, int(img.shape[0] * self.scale_factor))
+                        img_reduzida = cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
+                    else:
+                        img_reduzida = img
+
+                    self.templates[nome] = {
+                        "full": img,
+                        "scaled": img_reduzida,
+                        "shape_scaled": img_reduzida.shape,
+                    }
                     self.cooldowns[nome] = 0.0 # Inicializa o cooldown zerado
 
         self.var_farm = ctk.BooleanVar(value=True)
@@ -143,8 +160,15 @@ class AnkaBotFarm(ctk.CTk):
             if tempo_atual - self.cooldowns[template_name] < cooldown_segundos:
                 return False # Sai da função sem fazer nada, pois ainda está no cooldown
 
-        template = self.templates.get(template_name)
-        if template is None: return False
+        template_data = self.templates.get(template_name)
+        if template_data is None:
+            return False
+
+        template = template_data["scaled"]
+        t_h, t_w = template_data["shape_scaled"]
+
+        if screenshot.shape[0] < t_h or screenshot.shape[1] < t_w:
+            return False
         
         # 2. Faz a matemática matricial para achar a imagem
         res = cv2.matchTemplate(screenshot, template, cv2.TM_CCOEFF_NORMED)
@@ -152,14 +176,16 @@ class AnkaBotFarm(ctk.CTk):
         
         # 3. Se a confiança for maior que o threshold configurado
         if max_val >= threshold:
-            h, w = template.shape
-            
             x_inicial = max_loc[0]
             y_inicial = max_loc[1]
             
             # 4. Sorteia o clique dentro da área da imagem (com 5px de margem)
-            tx = random.randint(x_inicial + 5, max(x_inicial + w - 5, x_inicial + 5))
-            ty = random.randint(y_inicial + 5, max(y_inicial + h - 5, y_inicial + 5))
+            tx_scaled = random.randint(x_inicial + 3, max(x_inicial + t_w - 3, x_inicial + 3))
+            ty_scaled = random.randint(y_inicial + 3, max(y_inicial + t_h - 3, y_inicial + 3))
+
+            # Converte coordenadas da captura reduzida para o monitor real
+            tx = int(tx_scaled / self.scale_factor)
+            ty = int(ty_scaled / self.scale_factor)
             
             # 5. Move o mouse e clica
             ctypes.windll.user32.SetCursorPos(tx, ty)
@@ -183,9 +209,13 @@ class AnkaBotFarm(ctk.CTk):
                     continue
 
                 # --- PASSO 1: Captura ultrarrápida da memória da GPU/Sistema ---
-                img_bruta = np.array(sct.grab(monitor))
+                img_bruta = np.asarray(sct.grab(monitor), dtype=np.uint8)
                 # O MSS retorna BGRA, o OpenCV precisa de BGR ou Cinza. Convertendo direto para cinza:
                 screen_gray = cv2.cvtColor(img_bruta, cv2.COLOR_BGRA2GRAY)
+                if self.scale_factor < 1.0:
+                    novo_w = max(1, int(screen_gray.shape[1] * self.scale_factor))
+                    novo_h = max(1, int(screen_gray.shape[0] * self.scale_factor))
+                    screen_gray = cv2.resize(screen_gray, (novo_w, novo_h), interpolation=cv2.INTER_AREA)
 
                 # --- PASSO 2: Limpeza Total de Popups ---
                 limpou = False
@@ -210,7 +240,7 @@ class AnkaBotFarm(ctk.CTk):
                     self.buscar_e_clicar(screen_gray, "convite", threshold=0.8, cooldown_segundos=0.9)
 
                 # Alívio crucial para a CPU da Máquina Virtual não bater 100%
-                time.sleep(0.004)
+                time.sleep(self.loop_sleep)
 
     def iniciar_thread(self):
         if not self.rodando:
