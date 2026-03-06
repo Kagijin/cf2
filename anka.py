@@ -84,6 +84,7 @@ class AnkaBotFarm(ctk.CTk):
         self.cooldowns = {}
         self.scale_factor = 0.70  # Reduz custo do matchTemplate em VMs mais fracas
         self.loop_sleep = 0.0015
+        self.entrar_roi_rel = (0.62, 0.62, 0.38, 0.38)  # Região onde aparece "Entrar na partida"
         
         # --- CACHE DE TEMPLATES (OPEN-CV) ---
         self.templates = {}
@@ -110,6 +111,7 @@ class AnkaBotFarm(ctk.CTk):
                     self.templates[nome] = {
                         "full": img,
                         "scaled": img_reduzida,
+                        "shape_full": img.shape,
                         "shape_scaled": img_reduzida.shape,
                     }
                     self.cooldowns[nome] = 0.0 # Inicializa o cooldown zerado
@@ -153,7 +155,8 @@ class AnkaBotFarm(ctk.CTk):
         keyboard.add_hotkey('f5', self.iniciar_thread)
         keyboard.add_hotkey('f6', self.parar_bot)
 
-    def buscar_e_clicar(self, screenshot, template_name, threshold=0.8, cooldown_segundos=0.8):
+    def buscar_e_clicar(self, screenshot, template_name, threshold=0.8, cooldown_segundos=0.8,
+                       roi=None, usar_escala=True, monitor_offset=(0, 0)):
         # 1. Verifica se a imagem ainda está em tempo de recarga (cooldown)
         if template_name in self.cooldowns:
             tempo_atual = time.time()
@@ -164,37 +167,56 @@ class AnkaBotFarm(ctk.CTk):
         if template_data is None:
             return False
 
-        template = template_data["scaled"]
-        t_h, t_w = template_data["shape_scaled"]
+        if usar_escala and self.scale_factor < 1.0:
+            template = template_data["scaled"]
+            t_h, t_w = template_data["shape_scaled"]
+            escala = self.scale_factor
+        else:
+            template = template_data["full"]
+            t_h, t_w = template_data["shape_full"]
+            escala = 1.0
 
-        if screenshot.shape[0] < t_h or screenshot.shape[1] < t_w:
+        area = screenshot
+        roi_x, roi_y = 0, 0
+        if roi is not None:
+            x, y, w, h = roi
+            roi_x = max(0, x)
+            roi_y = max(0, y)
+            roi_w = min(w, screenshot.shape[1] - roi_x)
+            roi_h = min(h, screenshot.shape[0] - roi_y)
+            if roi_w <= 0 or roi_h <= 0:
+                return False
+            area = screenshot[roi_y:roi_y + roi_h, roi_x:roi_x + roi_w]
+
+        if area.shape[0] < t_h or area.shape[1] < t_w:
             return False
-        
+
         # 2. Faz a matemática matricial para achar a imagem
-        res = cv2.matchTemplate(screenshot, template, cv2.TM_CCOEFF_NORMED)
+        res = cv2.matchTemplate(area, template, cv2.TM_CCOEFF_NORMED)
         _, max_val, _, max_loc = cv2.minMaxLoc(res)
-        
+
         # 3. Se a confiança for maior que o threshold configurado
         if max_val >= threshold:
-            x_inicial = max_loc[0]
-            y_inicial = max_loc[1]
-            
-            # 4. Sorteia o clique dentro da área da imagem (com 5px de margem)
-            tx_scaled = random.randint(x_inicial + 3, max(x_inicial + t_w - 3, x_inicial + 3))
-            ty_scaled = random.randint(y_inicial + 3, max(y_inicial + t_h - 3, y_inicial + 3))
+            x_inicial = roi_x + max_loc[0]
+            y_inicial = roi_y + max_loc[1]
 
-            # Converte coordenadas da captura reduzida para o monitor real
-            tx = int(tx_scaled / self.scale_factor)
-            ty = int(ty_scaled / self.scale_factor)
-            
-            # 5. Move o mouse e clica
+            # 4. Sorteia o clique dentro da área da imagem
+            tx_frame = random.randint(x_inicial + 3, max(x_inicial + t_w - 3, x_inicial + 3))
+            ty_frame = random.randint(y_inicial + 3, max(y_inicial + t_h - 3, y_inicial + 3))
+
+            # 5. Converte coordenadas do frame para monitor real
+            tx_monitor = int(tx_frame / escala)
+            ty_monitor = int(ty_frame / escala)
+            tx = monitor_offset[0] + tx_monitor
+            ty = monitor_offset[1] + ty_monitor
+
             ctypes.windll.user32.SetCursorPos(tx, ty)
             KernelClickFast()
-            
+
             # 6. Registra o timestamp atual para acionar o cooldown deste botão específico
             self.cooldowns[template_name] = time.time()
             return True
-            
+
         return False
 
     def monitoramento_lobby(self):
@@ -212,16 +234,19 @@ class AnkaBotFarm(ctk.CTk):
                 img_bruta = np.asarray(sct.grab(monitor), dtype=np.uint8)
                 # O MSS retorna BGRA, o OpenCV precisa de BGR ou Cinza. Convertendo direto para cinza:
                 screen_gray = cv2.cvtColor(img_bruta, cv2.COLOR_BGRA2GRAY)
+                screen_gray_scaled = screen_gray
                 if self.scale_factor < 1.0:
                     novo_w = max(1, int(screen_gray.shape[1] * self.scale_factor))
                     novo_h = max(1, int(screen_gray.shape[0] * self.scale_factor))
-                    screen_gray = cv2.resize(screen_gray, (novo_w, novo_h), interpolation=cv2.INTER_AREA)
+                    screen_gray_scaled = cv2.resize(screen_gray, (novo_w, novo_h), interpolation=cv2.INTER_AREA)
+
+                monitor_offset = (monitor.get("left", 0), monitor.get("top", 0))
 
                 # --- PASSO 2: Limpeza Total de Popups ---
                 limpou = False
                 for btn in self.prioridades:
                     # Passando 1.5s de cooldown para dar tempo do popup sumir da tela após clicar
-                    if self.buscar_e_clicar(screen_gray, btn, threshold=0.8, cooldown_segundos=0.3):
+                    if self.buscar_e_clicar(screen_gray_scaled, btn, threshold=0.8, cooldown_segundos=0.3, monitor_offset=monitor_offset):
                         limpou = True
                         break 
                 
@@ -231,13 +256,24 @@ class AnkaBotFarm(ctk.CTk):
 
                 # --- PASSO 3: Entrar na Partida ---
                 # Cooldown de 2.0s para não spammar o botão "Entrar" enquanto o lobby carrega
-                if self.buscar_e_clicar(screen_gray, "entrar", threshold=0.85, cooldown_segundos=0.3):
+                h_full, w_full = screen_gray.shape[:2]
+                rx, ry, rw, rh = self.entrar_roi_rel
+                entrar_roi = (int(w_full * rx), int(h_full * ry), int(w_full * rw), int(h_full * rh))
+                if self.buscar_e_clicar(
+                    screen_gray,
+                    "entrar",
+                    threshold=0.80,
+                    cooldown_segundos=0.3,
+                    roi=entrar_roi,
+                    usar_escala=False,
+                    monitor_offset=monitor_offset,
+                ):
                     time.sleep(0.05)
                     continue
 
                 # --- PASSO 4: Convite ---
                 if self.var_farm.get() and random.random() < 0.1:
-                    self.buscar_e_clicar(screen_gray, "convite", threshold=0.8, cooldown_segundos=0.9)
+                    self.buscar_e_clicar(screen_gray_scaled, "convite", threshold=0.8, cooldown_segundos=0.9, monitor_offset=monitor_offset)
 
                 # Alívio crucial para a CPU da Máquina Virtual não bater 100%
                 time.sleep(self.loop_sleep)
