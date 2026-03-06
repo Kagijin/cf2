@@ -85,6 +85,7 @@ class AnkaBotFarm(ctk.CTk):
         self.scale_factor = 0.70  # Reduz custo do matchTemplate em VMs mais fracas
         self.loop_sleep = 0.0015
         self.entrar_roi_rel = (0.62, 0.62, 0.38, 0.38)  # Região onde aparece "Entrar na partida"
+        self.botoes_lobby_direita = ["cancelartotal", "cancelar", "entrar"]
         
         # --- CACHE DE TEMPLATES (OPEN-CV) ---
         self.templates = {}
@@ -94,7 +95,7 @@ class AnkaBotFarm(ctk.CTk):
         ]
         
         # Carrega todas as imagens para a memória RAM (escala de cinza) na inicialização
-        for nome in (["entrar", "convite", "banner"] + self.prioridades):
+        for nome in (["entrar", "cancelar", "convite", "banner"] + self.prioridades):
             ext = ".jpeg" if any(x in nome for x in ["cancelar2", "confirmar3", "dps1", "ok2", "ok3", "ok4", "trofeu1", "xzao"]) else ".png"
             caminho = resource_path(f"{nome}{ext}")
             if os.path.exists(caminho):
@@ -254,20 +255,29 @@ class AnkaBotFarm(ctk.CTk):
                     time.sleep(0.05)
                     continue
 
-                # --- PASSO 3: Entrar na Partida ---
-                # Cooldown de 2.0s para não spammar o botão "Entrar" enquanto o lobby carrega
+                # --- PASSO 3: Botões da direita (Cancelar/Entrar) ---
+                # Todos aparecem no mesmo local do botão "Iniciar" no lobby.
                 h_full, w_full = screen_gray.shape[:2]
                 rx, ry, rw, rh = self.entrar_roi_rel
                 entrar_roi = (int(w_full * rx), int(h_full * ry), int(w_full * rw), int(h_full * rh))
-                if self.buscar_e_clicar(
-                    screen_gray,
-                    "entrar",
-                    threshold=0.80,
-                    cooldown_segundos=0.3,
-                    roi=entrar_roi,
-                    usar_escala=False,
-                    monitor_offset=monitor_offset,
-                ):
+
+                clicou_lobby_direita = False
+                for botao in self.botoes_lobby_direita:
+                    # "Cancelar" e "Entrar" são textos pequenos: buscar em resolução cheia aumenta precisão.
+                    threshold = 0.78 if "cancelar" in botao else 0.80
+                    if self.buscar_e_clicar(
+                        screen_gray,
+                        botao,
+                        threshold=threshold,
+                        cooldown_segundos=0.3,
+                        roi=entrar_roi,
+                        usar_escala=False,
+                        monitor_offset=monitor_offset,
+                    ):
+                        clicou_lobby_direita = True
+                        break
+
+                if clicou_lobby_direita:
                     time.sleep(0.05)
                     continue
 
