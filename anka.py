@@ -86,6 +86,8 @@ class AnkaBotFarm(ctk.CTk):
         self.loop_sleep = 0.0015
         self.entrar_roi_rel = (0.62, 0.62, 0.38, 0.38)  # Região onde aparece "Entrar na partida"
         self.botoes_lobby_direita = ["cancelartotal", "cancelar", "entrar"]
+        self.min_match_confirmacoes = {"entrar": 2}
+        self.match_streak = {}
         
         # --- CACHE DE TEMPLATES (OPEN-CV) ---
         self.templates = {}
@@ -156,6 +158,19 @@ class AnkaBotFarm(ctk.CTk):
         keyboard.add_hotkey('f5', self.iniciar_thread)
         keyboard.add_hotkey('f6', self.parar_bot)
 
+    def registrar_match(self, template_name, encontrou):
+        atual = self.match_streak.get(template_name, 0)
+        if encontrou:
+            atual += 1
+        else:
+            atual = 0
+        self.match_streak[template_name] = atual
+        return atual
+
+    def pode_clicar_agora(self, template_name, streak_atual):
+        minimo = self.min_match_confirmacoes.get(template_name, 1)
+        return streak_atual >= minimo
+
     def buscar_e_clicar(self, screenshot, template_name, threshold=0.8, cooldown_segundos=0.8,
                        roi=None, usar_escala=True, monitor_offset=(0, 0)):
         # 1. Verifica se a imagem ainda está em tempo de recarga (cooldown)
@@ -197,7 +212,9 @@ class AnkaBotFarm(ctk.CTk):
         _, max_val, _, max_loc = cv2.minMaxLoc(res)
 
         # 3. Se a confiança for maior que o threshold configurado
-        if max_val >= threshold:
+        encontrou = max_val >= threshold
+        streak = self.registrar_match(template_name, encontrou)
+        if encontrou and self.pode_clicar_agora(template_name, streak):
             x_inicial = roi_x + max_loc[0]
             y_inicial = roi_y + max_loc[1]
 
@@ -216,6 +233,7 @@ class AnkaBotFarm(ctk.CTk):
 
             # 6. Registra o timestamp atual para acionar o cooldown deste botão específico
             self.cooldowns[template_name] = time.time()
+            self.match_streak[template_name] = 0
             return True
 
         return False
@@ -264,7 +282,7 @@ class AnkaBotFarm(ctk.CTk):
                 clicou_lobby_direita = False
                 for botao in self.botoes_lobby_direita:
                     # "Cancelar" e "Entrar" são textos pequenos: buscar em resolução cheia aumenta precisão.
-                    threshold = 0.78 if "cancelar" in botao else 0.80
+                    threshold = 0.78 if "cancelar" in botao else 0.90
                     if self.buscar_e_clicar(
                         screen_gray,
                         botao,
